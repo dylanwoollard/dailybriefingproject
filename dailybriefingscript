@@ -359,7 +359,7 @@ function callGemini(promptContext, historicalContext, marketContext) {
     4. APPENDIX A: INVESTMENT HORIZON NOTES
        - <h3>APPENDIX A: INVESTMENT HORIZON NOTES</h3>
        - <p><b>TACTICAL (1-WEEK):</b> ...</p>
-        - *Actionable Ideas:* List specific tickers.
+        - *Actionable Ideas:* List specific tickers. Focus on speculative, momentum-based plays. Whay is a NY desk trader watching in the microstructure? The investment horizon is 7 days.
        - <p><b>POSITIONAL (3-MONTH):</b> ...</p>
         - *Actionable Ideas:* List specific tickers.
        - <p><b>STRATEGIC (1-YEAR):</b>
@@ -373,15 +373,15 @@ function callGemini(promptContext, historicalContext, marketContext) {
        - <h3>APPENDIX B: RECOMMENDED READING</h3>
        - Constraint 1: Do not recommend books listed in the immediate past.
        - Constraint 2: Verify the book exists. If you are unsure, do not list it.
-       - Constraint 3: Provide a fuctional hyperlink for every item. For books, provide an Amazon Search Link (https://www.amazon.com/s?k=Title+Author). For essays, op-eods, or academic papers, provide a direct URL to the source or a link to a reputable scholarly database search to ensure validity.
+       - Constraint 3: Provide a fuctional hyperlink for every item. For books, provide an Amazon Search Link (https://www.amazon.com/s?k=Title+Author).
+       Constraint 4: Do not recommend "foundational books". Assume the reader has read all the basic books.
+       Constraint 5: Strategy books tackle the art and science of employing smaller parts in a synchronized, long-term manner to bridge Ends, Ways, and Means. "Strategy" does NOT need to be in the title.
        - 1. Strategy Book
        - 2. Strategy Book
        - 3. Strategy Book
        - 4. Strategy Book
        - 5. Humanitas Book
-       - 6. Essay/Op-ed from Foreign Affairs, WSJ Opinion. Thought-provoking pieces by "Big Names."
-       - 7. Academic Paper. (Must be well-cited, "edge" of defense/finance/energy or pertinent topic).
-       - Format: <p><b>Title</b> by Author. <i>Why: One sentence relevance.</i></p>
+       - Format: <p><b>Title</b> by Author. <i>Why: One sentence relevance. Follow with a maximum of 100 words on the general concept of the book.</i></p>
 
     ---------------------------------------------------
     PART 2: THE MEMORY DATA (JSON)
