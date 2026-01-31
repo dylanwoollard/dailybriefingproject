@@ -28,7 +28,11 @@ const CONFIG = {
   MAX_RETRIES: 3,
 
   // DEBUG MODE: Set to 'false' when ready to go live.
-  DEBUG_MODE: false
+  DEBUG_MODE: false,
+
+  // TEST MODE: Set 'true' to read emails WITHOUT deleting the label.
+  // This allows for you to run the script 10x on the same emails to tweak the propmt.
+  RETAIN_DATA_FOR_TESTING: true
 };
 
 /**
@@ -60,7 +64,9 @@ function generateDailyBriefing() {
   }
 
   // 3. RETRIEVE EMAILS
-  const threads = GmailApp.search(`label:${CONFIG.GMAIL_LABEL} newer_than:1d`);
+  // If testing, look back 2 days to find old test data. If live, only look at fresh 24h data.
+  const timeWindow = CONFIG.RETAIN_DATA_FOR_TESTING ? "newer_than:7d" : "newer_than:1d"
+  const threads = GmailApp.search(`label:${CONFIG.GMAIL_LABEL} ${timeWindow}`);
   if (threads.length === 0) {
     Logger.log("No new intelligence found. Aborting.");
     return;
@@ -96,7 +102,9 @@ function generateDailyBriefing() {
     });
 
     // Remove Label
-    if (label) thread.removeLabel(label);
+    if (label && !CONFIG.RETAIN_DATA_FOR_TESTING) {
+      thread.removeLabel(label);
+    }
   }
 
   // 4. CALL AI
@@ -308,8 +316,15 @@ function callGemini(promptContext, historicalContext, marketContext) {
       - Correct: (Washingtin Post), (New York Times), (Defense News).
 
     KEY LEADER PROFILE (CONDITIONAL):
-    - *Trigger:* If the intelligence mentions a major appointment (General Officer, Central Bank Chair, CEO, Cabinet Official).
-    - *Output:* Generate a "KEY LEADER PROFILE" section. Include: Bio, Credentials, and Strategic Stance (Hawkish/Dovish/Reformist).
+    - Trigger: If the intelligence mentions a prolific or influential individual
+    - Task: Generate a comprehensive profile.
+    - Constraint: Supplement the email intelligence with internal knowledge base. Do not rely solely on the provided text if it is thin.
+    - Fields that should be included:
+      1. Role and Context
+      2. Total Education
+      3. Professional History
+      4. Affiliations and Networks
+      5. Direct Impact
 
     OUTPUT FORMAT: STRICT HTML TAGS (<h3>, <p>, <ul>, <li>, <b>, <i>, <div class="epigraph">).
 
@@ -354,17 +369,18 @@ function callGemini(promptContext, historicalContext, marketContext) {
        </p>
        - <div class="page-break"></div>
 
-    5. APPENDIX B: STRATEGIC READING LIST (NO REDUNDANCY)
+    5. APPENDIX B: STRATEGIC READING LIST (NO REDUNDANCY OR HALLUCINATIONS)
        - <h3>APPENDIX B: RECOMMENDED READING</h3>
-       - **Constraint:** Do not recommend books listed in the immediate past (e.g., Avoid Marcus Aurelius if recently used). Ensure variety. Target "Second-Order" analysis or niche history. The Humanitas book refers to the Latin and Renaissance idea of the cultivation of rhetoric, poetry, history, moral philosophy, and art.
-       - **Required Composition (7 Items Total):**
-       - 1. **Strategy Book:**
-       - 2. **Strategy Book:**
-       - 3. **Strategy Book:**
-       - 4. **Strategy Book:**
-       - 5. **Humanitas Book:**
-       - 6. **Essay/Op-Ed:** (Foreign Affairs, WSJ Opinion). Thought-provoking pieces by "Big Names."
-       - 7. **Academic Paper:** (Must be well-cited, "edge" of defense/finance/energy or pertinent topic).
+       - Constraint 1: Do not recommend books listed in the immediate past.
+       - Constraint 2: Verify the book exists. If you are unsure, do not list it.
+       - Constraint 3: Provide a fuctional hyperlink for every item. For books, provide an Amazon Search Link (https://www.amazon.com/s?k=Title+Author). For essays, op-eods, or academic papers, provide a direct URL to the source or a link to a reputable scholarly database search to ensure validity.
+       - 1. Strategy Book
+       - 2. Strategy Book
+       - 3. Strategy Book
+       - 4. Strategy Book
+       - 5. Humanitas Book
+       - 6. Essay/Op-ed from Foreign Affairs, WSJ Opinion. Thought-provoking pieces by "Big Names."
+       - 7. Academic Paper. (Must be well-cited, "edge" of defense/finance/energy or pertinent topic).
        - Format: <p><b>Title</b> by Author. <i>Why: One sentence relevance.</i></p>
 
     ---------------------------------------------------
