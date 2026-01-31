@@ -1,0 +1,544 @@
+/**
+ * CONFIGURATION SECTION
+ */
+const CONFIG = {
+  // Your Google Gemini API Key
+  API_KEY: 'AIzaSyAxmgH-eDmAt044tD20pdbV0eakcHS4Gdc', 
+  
+  // The label for newsletters
+  GMAIL_LABEL: 'DailyBriefing', 
+  
+  // Your personal email
+  PERSONAL_EMAIL: 'dylanwoollardbiz@gmail.com',
+  
+  // Title of the report
+  REPORT_TITLE: 'WOOLLARD DAILY BRIEFING',
+  
+  // The Database ID
+  SPREADSHEET_ID: '1TGkiz7R19Fz0fbbYbqfWzGYKQbcX80e85AXbdp63rxQ',
+  
+  // Model ID
+  MODEL_NAME: 'gemini-2.5-flash',
+  
+  // SAFETY SWITCH: Set 'true' to print. Set 'false' to save ink (email only).
+  PRINT_ENABLED: false,
+  PRINTER_EMAIL: 'ayre63ibcea89@hpeprint.com',
+  
+  // MAX RETRIES for API calls
+  MAX_RETRIES: 3,
+
+  // DEBUG MODE: Set to 'false' when ready to go live.
+  DEBUG_MODE: false
+};
+
+/**
+ * MAIN FUNCTION
+ */
+function generateDailyBriefing() {
+  Logger.log("Starting Intelligence Cycle...");
+  
+  // 1. RETRIEVE MEMORY
+  const historicalContext = getHistoricalContext();
+  Logger.log("Long-term memory retrieved.");
+
+  // 2. FETCH LIVE MARKETS (YAHOO CHART API)
+  const marketData = fetchYahooMarkets();
+
+  // Format market data for the AI Prompt (Text Block)
+  let marketContextForAI = "LIVE MARKET DATA:\n";
+  marketData.forEach(m => {
+      marketContextForAI += `${m.name}: ${m.price} (${m.change})\n`;
+  });
+
+  // --- DEBUG CHECK ---
+  if (CONFIG.DEBUG_MODE) {
+    Logger.log("------------------------------------------------");
+    Logger.log("[DEBUG MODE ACTIVE] Script will stop here.");
+    Logger.log("MARKET DATA STATUS:");
+    Logger.log(marketContextForAI);
+    return; // STOP EXECUTION
+  }
+
+  // 3. RETRIEVE EMAILS
+  const threads = GmailApp.search(`label:${CONFIG.GMAIL_LABEL} newer_than:1d`);
+  if (threads.length === 0) {
+    Logger.log("No new intelligence found. Aborting.");
+    return;
+  }
+  
+  const label = GmailApp.getUserLabelByName(CONFIG.GMAIL_LABEL);
+  let fullContent = "";
+  let sourceRegistry = []; 
+
+  Logger.log(`Processing ${threads.length} intelligence streams...`);
+
+  for (const thread of threads) {
+    const messages = thread.getMessages();
+    const message = messages[messages.length - 1]; 
+    const subject = message.getSubject();
+    const sender = message.getFrom();
+    const threadLink = thread.getPermalink(); 
+    
+    // Normalize Source Names
+    let cleanSource = sender.split('<')[0].replace(/"/g, "").trim();
+    if (cleanSource.includes("The Economist")) cleanSource = "The Economist";
+    if (cleanSource.includes("Bloomberg")) cleanSource = "Bloomberg News";
+    if (cleanSource.includes("War Zone")) cleanSource = "The War Zone";
+    if (cleanSource.includes("Defense News")) cleanSource = "Defense News";
+    
+    // Truncate to 12k chars per email
+    fullContent += `\n--- CONTAINER_SOURCE: ${cleanSource} | HEADER: ${subject} ---\n${message.getPlainBody().substring(0, 12000)}\n`;
+    
+    sourceRegistry.push({
+      source: cleanSource,
+      subject: subject,
+      link: threadLink
+    });
+
+    // Remove Label
+    if (label) thread.removeLabel(label);
+  }
+
+  // 4. CALL AI
+  const rawAiResponse = callGeminiWithRetry(fullContent, historicalContext, marketContextForAI);
+  if (!rawAiResponse) {
+    Logger.log("CRITICAL FAILURE: AI failed after max retries.");
+    return;
+  }
+
+  // 5. PARSE OUTPUT
+  const parts = rawAiResponse.split("|||DATABASE|||");
+  const htmlContent = parts[0];
+  let dbJson = [];
+  
+  if (parts.length > 1) {
+    try {
+      let cleanJson = parts[1].replace(/```json/g, "").replace(/```/g, "").trim();
+      dbJson = JSON.parse(cleanJson);
+      saveToMemory(dbJson);
+      Logger.log("New intelligence saved to Long-Term Memory.");
+    } catch (e) {
+      Logger.log("Failed to parse database JSON: " + e.toString());
+    }
+  }
+
+  // 6. GENERATE PDF (Passing marketData for the Dashboard Table)
+  const pdfBlob = createPDF(htmlContent, sourceRegistry, marketData);
+
+  // 7. DELIVER
+  MailApp.sendEmail({
+    to: CONFIG.PERSONAL_EMAIL,
+    subject: `[DIGITAL] ${CONFIG.REPORT_TITLE}`,
+    body: `Attached is today's briefing.`,
+    attachments: [pdfBlob]
+  });
+  Logger.log("Digital copy sent.");
+
+  if (CONFIG.PRINT_ENABLED && CONFIG.PRINTER_EMAIL) {
+    MailApp.sendEmail({
+      to: CONFIG.PRINTER_EMAIL,
+      subject: CONFIG.REPORT_TITLE,
+      body: " ", 
+      attachments: [pdfBlob]
+    });
+    Logger.log("Sent to HP Printer.");
+  }
+}
+
+/**
+ * HELPER: Fetch Live Market Data (Yahoo Chart API)
+ */
+function fetchYahooMarkets() {
+  const symbols = [
+    { ticker: "CL=F", name: "WTI Crude" },
+    { ticker: "GC=F", name: "Gold" },
+    { ticker: "^TNX", name: "10Y Yield" },
+    { ticker: "DX-Y.NYB", name: "DXY Index" },
+    { ticker: "^GSPC", name: "S&P 500" }
+  ];
+
+  let results = [];
+  
+  symbols.forEach(item => {
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(item.ticker)}?interval=1d&range=1d`;
+      const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      const json = JSON.parse(response.getContentText());
+
+      if (json.chart && json.chart.result) {
+        const meta = json.chart.result[0].meta;
+        const price = meta.regularMarketPrice;
+        const prevClose = meta.chartPreviousClose;
+        
+        let changePct = 0;
+        if (prevClose > 0) {
+          changePct = ((price - prevClose) / prevClose) * 100;
+        }
+
+        const sign = changePct >= 0 ? "+" : "";
+        const changeStr = `${sign}${changePct.toFixed(2)}%`;
+
+        results.push({
+          name: item.name,
+          price: price.toFixed(2),
+          change: changeStr,
+          rawChange: changePct 
+        });
+      } else {
+        results.push({ name: item.name, price: "ERR", change: "---", rawChange: 0 });
+      }
+    } catch (e) {
+      Logger.log(`Failed to fetch ${item.ticker}: ${e.toString()}`);
+      results.push({ name: item.name, price: "N/A", change: "---", rawChange: 0 });
+    }
+  });
+
+  return results;
+}
+
+/**
+ * HELPER: Get History
+ */
+function getHistoricalContext() {
+  try {
+    const sheet = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID).getActiveSheet();
+    if (sheet.getLastRow() < 2) return "";
+    
+    // Get last 20 rows
+    const startRow = Math.max(2, sheet.getLastRow() - 20);
+    const numRows = sheet.getLastRow() - startRow + 1;
+    const data = sheet.getRange(startRow, 1, numRows, 3).getValues();
+    
+    return data.map(r => `[${new Date(r[0]).toLocaleDateString()}] ${r[1]}: ${r[2]}`).join("\n");
+  } catch (e) {
+    return "Memory unavailable.";
+  }
+}
+
+/**
+ * HELPER: Save History
+ */
+function saveToMemory(jsonData) {
+  try {
+    const sheet = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID).getActiveSheet();
+    if (sheet.getLastRow() === 0) {
+      sheet.appendRow(["Date", "Theme_Title", "Strategic_Summary", "Key_Entities"]);
+    }
+    jsonData.forEach(item => {
+      sheet.appendRow([new Date(), item.theme, item.summary, item.entities]);
+    });
+  } catch (e) {
+    Logger.log("Memory Save Error: " + e.toString());
+  }
+}
+
+/**
+ * HELPER: Call Gemini API
+ */
+function callGeminiWithRetry(promptContext, historicalContext, marketContext) {
+  let attempts = 0;
+  
+  while (attempts < CONFIG.MAX_RETRIES) {
+    try {
+      Logger.log(`AI Generation Attempt ${attempts + 1}/${CONFIG.MAX_RETRIES}...`);
+      const result = callGemini(promptContext, historicalContext, marketContext);
+      if (result) return result; 
+      throw new Error("Empty response from API");
+    } catch (e) {
+      attempts++;
+      Logger.log(`API Error (Attempt ${attempts}): ${e.toString()}`);
+      if (attempts < CONFIG.MAX_RETRIES) {
+        Utilities.sleep(5000 * attempts);
+      }
+    }
+  }
+  return null; 
+}
+
+function callGemini(promptContext, historicalContext, marketContext) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${CONFIG.MODEL_NAME}:generateContent?key=${CONFIG.API_KEY}`;
+  
+  const systemPrompt = `
+    You are a Senior Intelligence Officer and Geopolitical Strategist writing for a US Army 2LT/Macro Hedge Fund Portoflio Manager.
+
+    OBJECTIVE: Synthesize intelligence into a high-density, high-fidelity briefing using strict HTML.
+    
+    AUDIENCE PROFILE:
+    A Macro Hedge Fund PM / Army Officer. 
+    They demand a **Bureaucratic, Detached, and Doctrinal** tone. 
+    - **No Journalistic Flair:** Remove adjectives like "soaring," "plummeting," "shocking." Use "increasing," "declining," "significant."
+    - **No Bias:** Filter out the bias of source text. Present the mechanism, not the narrative.
+    
+    THE "LEVELS OF WAR" FRAMEWORK:
+    1. TACTICAL: Specific events, numbers, etc. Everything that's factual and happening on the microscale.
+    2. OPERATIONAL (The Bridge): How does these events fit into the larger scope? The logistics, geometry, friction points, and requirements of the second level up.
+    3. STRATEGIC (Big Picture): The big picture from 10,000 feet. How dos the operational and tactical level effect the global stage? The big picture items.
+
+    WRITING STYLE:
+    - **TONE:** Plainspoken, analytical, direct.
+    - **METHOD:**: Causal analysis. Avoid passive framing. Be adversarial and self-testing.
+      - Bad: "The carrier movement signifies US resolve."
+      - Good: "Moving the CVN-72 into the Red Sea provides immediate air superiority (How), denying Houthi forces uncontested launch windows (Why)."
+        - Do not accept a narrative at face value.
+        - Do not present the optimistic or pessimistic case.
+        - Present the pragmatic case by weighing the intent against the friction. What is most probable?
+    - **SENTENCE STRUCTURE:** Vary your sentence length.
+    - **VOCABULARY:** Use precise or technical terms when applicable but explain the impact simply.
+    
+    INVESTMENT PHILOSOPHY (WEIGHTED SCREENER, APPENDIX A ONLY):
+    - **Target Alpha:** The $250M - $10B Market Cap range (Small/Mid-Cap). This is the priority.
+    - **The Conviction Ladder:**
+      - *Small/Mid-Cap:* Standard Conviction.
+      - *Large/Mega-Cap (>$10B):* **EXTREME CONVICTION REQUIRED.** Do not recommend a Mega-Cap unless the alpha is undeniable and significantly higher than a small-cap proxy.
+    - **Constraint:** US Listings ONLY (NYSE/NASDAQ). All recommended companies MUST be tradable on the NYSE or NASDAQ. 
+    - Conduct supply-side analysis using the following logic.
+      - High returns induces increased investment through high capital expenditures leading to over capacity and later lower returns
+      - Invetors should focus on corporate behavior rather than forecasting demand
+      - Stocks with high asset growth often underperform in the long term because they overinvest during boom times
+      - Companies with strong moats can maintain high returns even when competitors try to invest
+  
+    CRITICAL RULE: Ticker Hallucination Check
+      - You are strictly forbidden from guessing tickers.
+      - If you list a company in Appendix A, you must be 100% certain of its ticker.
+      - Format: "Legal Name (EXCHANGE:TICKER)" -> e.g., "The Coca-Cola Company (NYSE:KO)".
+
+    CRITICAL RULE: CITATION NAMES
+      - Do not abbreviate ciations
+      - Incorrect: (WaPo), (NYT), (DefNews).
+      - Correct: (Washingtin Post), (New York Times), (Defense News).
+
+    KEY LEADER PROFILE (CONDITIONAL):
+    - *Trigger:* If the intelligence mentions a major appointment (General Officer, Central Bank Chair, CEO, Cabinet Official).
+    - *Output:* Generate a "KEY LEADER PROFILE" section. Include: Bio, Credentials, and Strategic Stance (Hawkish/Dovish/Reformist).
+
+    OUTPUT FORMAT: STRICT HTML TAGS (<h3>, <p>, <ul>, <li>, <b>, <i>, <div class="epigraph">).
+
+    STRUCTURE:
+    
+    1. THE EPIGRAPH (Flavor):
+       - Insert a <div class="epigraph"> block with a quote. Attribute it.
+    
+    2. THEMATIC ANALYSIS (Top 4-6 Themes):
+       - <h3>THEME TITLE</h3>
+       - Bullet points (Cite source inside text: (Bloomberg News)).</li></ul> Focus: Specific events, specific units, specific numbers.
+
+       - <p><b>THE BRIDGE:</b> Narrative (max 250 words). 
+        - <b>The Task:</b> Explain the Why and How. Connect the bullets to the second level up.
+        - <b>The Method:</b> Self-test. Acknowledge the goal then press its logic.
+           - Example: "While moving the 82nd suggests offensive intent, the lack of forward sustainment nodes suggests a defensive posutre."
+        - Constraint: Do not use "signifies" or "underscores". Explain the friction and the tactical consequence.</p>
+
+      - <p><b>BIG PICTURE:</b> Narrative (max 250 words).
+        - The Task: Connect the Bridge to the reality of the global board.
+        - Method: Pragmatic international political macroeconomy and defense economics. Avoid hyperbole. If the supply chain breaks, does it matter? What matters?
+        - Market Data: Integrate the LIVE MARKET DATA only if it causally explains a move.
+        - Constraint: No specific ticker recommendations here.</p>>
+       
+    3. (OPTIONAL) KEY LEADER PROFILE:
+       - <h3>KEY LEADER PROFILE: [NAME]</h3>
+       - <p><b>Role:</b> ...</p>
+       - <p><b>Background:</b> ...</p>
+       - <p><b>Strategic Stance:</b> ...</p>
+       - <div class="page-break"></div>
+
+    4. APPENDIX A: INVESTMENT HORIZON NOTES
+       - <h3>APPENDIX A: INVESTMENT HORIZON NOTES</h3>
+       - <p><b>TACTICAL (1-WEEK):</b> ...</p>
+        - *Actionable Ideas:* List specific tickers.
+       - <p><b>POSITIONAL (3-MONTH):</b> ...</p>
+        - *Actionable Ideas:* List specific tickers.
+       - <p><b>STRATEGIC (1-YEAR):</b>
+         - *Actionable Ideas:* List specific tickers.
+         - *Priority:* Neglected Small/Mid-Caps ($250M-$10B).
+         - Format: "Legal Name (EXCHANGE:TICKER)".
+       </p>
+       - <div class="page-break"></div>
+
+    5. APPENDIX B: STRATEGIC READING LIST (NO REDUNDANCY)
+       - <h3>APPENDIX B: RECOMMENDED READING</h3>
+       - **Constraint:** Do not recommend books listed in the immediate past (e.g., Avoid Marcus Aurelius if recently used). Ensure variety. Target "Second-Order" analysis or niche history. The Humanitas book refers to the Latin and Renaissance idea of the cultivation of rhetoric, poetry, history, moral philosophy, and art.
+       - **Required Composition (7 Items Total):**
+       - 1. **Strategy Book:**
+       - 2. **Strategy Book:**
+       - 3. **Strategy Book:**
+       - 4. **Strategy Book:**
+       - 5. **Humanitas Book:**
+       - 6. **Essay/Op-Ed:** (Foreign Affairs, WSJ Opinion). Thought-provoking pieces by "Big Names."
+       - 7. **Academic Paper:** (Must be well-cited, "edge" of defense/finance/energy or pertinent topic).
+       - Format: <p><b>Title</b> by Author. <i>Why: One sentence relevance.</i></p>
+
+    ---------------------------------------------------
+    PART 2: THE MEMORY DATA (JSON)
+    After the HTML, type "|||DATABASE|||". Then provide a JSON Array summarizing the themes.
+    Format: [{"theme": "...", "summary": "...", "entities": "..."}]
+    ---------------------------------------------------
+    
+    NEGATIVE CONSTRAINTS:
+    - BANNED WORDS: "Signifies," "Underscores," "Highlights," "Reflects," "Serves as," "Pivot."
+    - NO Intro/Outro text. Start immediately with the <div class="epigraph">.
+  `;
+
+  const inputPayload = `
+    LIVE MARKET DATA (REAL-TIME SNAPSHOT):
+    ${marketContext}
+
+    HISTORICAL CONTEXT:
+    ${historicalContext}
+    
+    CURRENT INTELLIGENCE:
+    ${promptContext}
+  `;
+
+  const payload = {
+    "contents": [{
+      "parts": [
+        {"text": systemPrompt},
+        {"text": inputPayload}
+      ]
+    }],
+    "safetySettings": [
+      { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE" },
+      { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE" },
+      { "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE" },
+      { "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE" }
+    ]
+  };
+
+  const options = {
+    "method": "post",
+    "contentType": "application/json",
+    "payload": JSON.stringify(payload),
+    "muteHttpExceptions": true
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const data = JSON.parse(response.getContentText());
+    
+    if (!data.candidates) {
+      Logger.log("API returned no candidates.");
+      return null;
+    }
+    return data.candidates[0].content.parts[0].text;
+  } catch (e) {
+    Logger.log("API Connection Error in sub-function: " + e.toString());
+    throw e; // Throw to trigger the retry loop
+  }
+}
+
+/**
+ * HELPER: Create PDF with Appendix C
+ */
+function createPDF(htmlContent, sourceRegistry, marketData) {
+  let cleanHtml = htmlContent.replace(/```html/g, "").replace(/```/g, "");
+
+  // Build the Macro Dashboard Table
+  let macroTableHtml = `
+    <table style="width:100%; border-collapse: collapse; font-size: 10pt; margin-bottom: 30px; border: 2px solid #000;">
+      <tr style="background-color: #f0f0f0; text-align: center;">
+  `;
+  
+  // Headers
+  marketData.forEach(m => {
+    macroTableHtml += `<th style="padding: 8px; border: 1px solid #ccc;">${m.name}</th>`;
+  });
+  macroTableHtml += `</tr><tr style="text-align: center;">`;
+
+  // Data
+  marketData.forEach(m => {
+    let color = "#000";
+    if (m.rawChange > 0) color = "#006400"; // Green
+    if (m.rawChange < 0) color = "#8B0000"; // Red
+    macroTableHtml += `<td style="padding: 8px; border: 1px solid #ccc;">
+      <div><b>${m.price}</b></div>
+      <div style="color:${color}; font-size: 9pt;">${m.change}</div>
+    </td>`;
+  });
+  macroTableHtml += `</tr></table>`;
+
+  // Generate Appendix C (Bibliography)
+  let appendixCHtml = `
+    <div class="page-break"></div>
+    <h3>APPENDIX C: INTELLIGENCE STREAMS (BIBLIOGRAPHY)</h3>
+    <table style="width:100%; border-collapse: collapse; font-size: 9pt; margin-top: 20px;">
+      <tr style="background-color: #ddd; text-align: left;">
+        <th style="padding: 8px; border-bottom: 2px solid #000;">SOURCE</th>
+        <th style="padding: 8px; border-bottom: 2px solid #000;">REPORT HEADER</th>
+        <th style="padding: 8px; border-bottom: 2px solid #000;">ACCESS</th>
+      </tr>
+  `;
+
+  sourceRegistry.forEach(item => {
+    appendixCHtml += `
+      <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><strong>${item.source}</strong></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">${item.subject}</td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><a href="${item.link}" style="color: #000; text-decoration: none;">[OPEN]</a></td>
+      </tr>
+    `;
+  });
+  appendixCHtml += `</table>`;
+
+  const htmlTemplate = `
+    <html>
+      <head>
+        <style>
+          /* 1-INCH MARGINS (96px) */
+          body { 
+            font-family: 'Times New Roman', serif; 
+            padding: 96px; 
+            margin: 0;
+            line-height: 1.4; 
+            font-size: 11pt; 
+          }
+          
+          h1 { text-align: center; border-bottom: 3px solid #000; padding-bottom: 5px; font-size: 18pt; margin-bottom: 10px; letter-spacing: 2px; }
+          .meta { text-align: center; font-size: 10pt; color: #000; margin-bottom: 30px; font-weight: bold; }
+          
+          /* EPIGRAPH STYLING */
+          .epigraph {
+            font-style: italic;
+            text-align: center;
+            margin: 20px 40px 40px 40px;
+            color: #444;
+            font-size: 12pt;
+          }
+
+          h3 { 
+            font-family: 'Arial', sans-serif;
+            font-size: 11pt; 
+            font-weight: bold;
+            text-transform: uppercase; 
+            margin-top: 25px; 
+            margin-bottom: 5px; 
+            border-bottom: 1px solid #000;
+          }
+          
+          ul { margin-top: 5px; margin-bottom: 15px; padding-left: 20px; }
+          li { margin-bottom: 6px; text-align: justify; }
+          
+          p { margin-bottom: 15px; text-align: justify; display: block; }
+          
+          /* PAGE BREAK LOGIC */
+          .page-break { page-break-after: always; display: block; height: 1px; }
+          
+        </style>
+      </head>
+      <body>
+        <h1>${CONFIG.REPORT_TITLE}</h1>
+        <div class="meta">
+          ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }).toUpperCase()}
+        </div>
+        
+        ${macroTableHtml}
+        
+        ${cleanHtml}
+
+        ${appendixCHtml}
+      </body>
+    </html>
+  `;
+
+  const blob = Utilities.newBlob(htmlTemplate, "text/html", "briefing.html");
+  return blob.getAs("application/pdf").setName(`Briefing_${new Date().toISOString().slice(0,10)}.pdf`);
+}
